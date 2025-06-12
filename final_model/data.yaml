@@ -1,0 +1,5 @@
+path: /home/dachuang/vqa/final_model/yolov8_dataset
+train: images/train
+val: images/val
+names:
+  0: meter
