@@ -213,3 +213,7 @@ print(f"测试成功: {report['testing']['success']}")
 ---
 
 📧 如有问题，请检查实验报告中的详细错误信息。 
+
+
+# 验收测试
+process_labels.py  修改labels.csv文件的路径，运行即可输出数据到results.csv文件

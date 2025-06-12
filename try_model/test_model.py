@@ -19,7 +19,7 @@ import re
 # 配置参数
 VAL_IMAGES_DIR = './yolov8_dataset/images/val'
 LABEL_FILE = './Dataset/labels.csv'
-YOLO_MODEL_PATH = './runs/detect/meter_detection/weights/best.pt'
+YOLO_MODEL_PATH = './runs/detect/meter_detection4/weights/best.pt'
 CRNN_MODEL_PATH = './crnn_improved_best.pth'  # 使用改进的最佳模型
 DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
@@ -362,5 +362,169 @@ def test_improved_model():
     print(f"💾 保存结果到: {results_file}")
     print(f"✅ 改进CRNN模型测试完成")
 
+def save_test_results(output_file='test_results.csv'):
+    """
+    生成测试结果并保存到指定格式的文件
+    格式：第一列是测试数据的id，第二列是电表读数，中间以英文逗号分隔
+    示例：0,8430.8
+    """
+    print("🚀 生成测试结果文件")
+    print("=" * 60)
+    
+    # 检查模型文件
+    if not os.path.exists(CRNN_MODEL_PATH):
+        print(f"❌ 改进模型不存在: {CRNN_MODEL_PATH}")
+        print("💡 请先运行 train_crnn_improved.py 训练模型")
+        return
+    
+    # 加载YOLO模型
+    try:
+        yolo_model = YOLO(YOLO_MODEL_PATH)
+        print("✅ YOLO模型加载成功")
+    except Exception as e:
+        print(f"❌ YOLO模型加载失败: {e}")
+        return
+    
+    # 加载改进的CRNN模型
+    try:
+        crnn_model = ImprovedCRNN(IMG_HEIGHT, 1, HIDDEN_SIZE, len(CHARS)).to(DEVICE)
+        crnn_model.load_state_dict(torch.load(CRNN_MODEL_PATH, map_location=DEVICE))
+        crnn_model.eval()
+        print("✅ 改进CRNN模型加载成功")
+    except Exception as e:
+        print(f"❌ CRNN模型加载失败: {e}")
+        return
+    
+    # 加载验证数据
+    df = pd.read_csv(LABEL_FILE)
+    val_images = set(os.listdir(VAL_IMAGES_DIR))
+    val_data = df[df['filename'].isin(val_images)].reset_index(drop=True)
+    print(f"📊 测试样本数: {len(val_data)}")
+    
+    # 图像预处理
+    transform = transforms.Compose([
+        transforms.Resize((IMG_HEIGHT, IMG_WIDTH)),
+        transforms.ToTensor(),
+        transforms.Normalize((0.5,), (0.5,))
+    ])
+    
+    # 初始化智能后处理器
+    postprocessor = SmartPostProcessor()
+    
+    print(f"🔍 开始模型推理...")
+    
+    # 存储结果
+    results = []
+    
+    for idx, row in val_data.iterrows():
+        filename = row['filename']
+        img_path = os.path.join(VAL_IMAGES_DIR, filename)
+        
+        # 加载图像
+        image = cv2.imread(img_path)
+        if image is None:
+            continue
+        
+        # YOLO检测
+        yolo_results = yolo_model(image, verbose=False)
+        
+        # 智能边界框选择
+        true_bbox = (int(row['xmin']), int(row['ymin']), int(row['xmax']), int(row['ymax']))
+        x1, y1, x2, y2, bbox_source = smart_bbox_fallback(yolo_results, true_bbox)
+        
+        # 提取数字区域
+        digit_region = image[y1:y2, x1:x2]
+        if digit_region.size == 0:
+            # 如果无法提取区域，使用默认值
+            predicted_reading = "0"
+        else:
+            # 预处理数字区域
+            digit_gray = cv2.cvtColor(digit_region, cv2.COLOR_BGR2GRAY)
+            pil_image = Image.fromarray(digit_gray)
+            image_tensor = transform(pil_image).unsqueeze(0).to(DEVICE)
+            
+            # CRNN推理
+            with torch.no_grad():
+                outputs = crnn_model(image_tensor)
+                raw_prediction = decode_ctc_greedy(outputs)
+            
+            # 智能后处理
+            predicted_reading = postprocessor.process_prediction(raw_prediction)
+            
+            # 如果处理后为空，使用默认值
+            if not predicted_reading:
+                predicted_reading = "0"
+        
+        # 保存结果（id从0开始）
+        results.append(f"{idx},{predicted_reading}")
+        
+        # 显示进度
+        if (idx + 1) % 20 == 0:
+            print(f"已处理: {idx + 1}/{len(val_data)}")
+    
+    # 保存到文件
+    with open(output_file, 'w', encoding='utf-8') as f:
+        for result in results:
+            f.write(result + '\n')
+    
+    print(f"\n✅ 测试结果已保存到: {output_file}")
+    print(f"📊 共处理 {len(results)} 个样本")
+    print(f"📝 文件格式: id,meter_reading")
+    print(f"💡 示例: 0,8430.8")
+    
+    # 显示前几行作为示例
+    print(f"\n📋 前5行示例:")
+    for i, result in enumerate(results[:5]):
+        print(f"  {result}")
+    
+    return output_file
+
+def main():
+    """主函数，提供多种功能选择"""
+    import sys
+    
+    if len(sys.argv) > 1:
+        mode = sys.argv[1]
+        if mode == 'save_results':
+            # 生成测试结果文件
+            output_file = sys.argv[2] if len(sys.argv) > 2 else 'test_results.csv'
+            save_test_results(output_file)
+        elif mode == 'test':
+            # 运行测试并显示准确率
+            test_improved_model()
+        else:
+            print("使用方法:")
+            print("  python test_model.py test          # 运行测试并显示准确率")
+            print("  python test_model.py save_results  # 生成测试结果文件(默认: test_results.csv)")
+            print("  python test_model.py save_results output.csv  # 生成测试结果文件到指定文件")
+    else:
+        # 默认显示菜单
+        print("🎯 电表读数识别测试工具")
+        print("=" * 40)
+        print("1. 运行测试并显示准确率")
+        print("2. 生成测试结果文件")
+        print("3. 退出")
+        
+        while True:
+            try:
+                choice = input("\n请选择功能 (1-3): ").strip()
+                if choice == '1':
+                    test_improved_model()
+                    break
+                elif choice == '2':
+                    output_file = input("输入输出文件名 (默认: test_results.csv): ").strip()
+                    if not output_file:
+                        output_file = 'test_results.csv'
+                    save_test_results(output_file)
+                    break
+                elif choice == '3':
+                    print("👋 再见!")
+                    break
+                else:
+                    print("❌ 无效选择，请输入 1-3")
+            except KeyboardInterrupt:
+                print("\n👋 再见!")
+                break
+
 if __name__ == '__main__':
-    test_improved_model() 
+    main() 
